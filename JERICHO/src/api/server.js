@@ -51,19 +51,16 @@ export function buildServer() {
 
     if (req.method === 'GET' && req.url === '/pipeline') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      respondJson(res, { ...result, state });
+      const signature = computeStateSignature(state);
+      const { pipeline } = await getPipelineArtifacts(state, signature);
+      respondJson(res, { ...pipeline, state });
       return;
     }
     if (req.method === 'GET' && req.url === '/ai/view') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const scene = compileSceneGraph(result);
-      respondJson(res, { scene, raw: result });
+      const signature = computeStateSignature(state);
+      const { pipeline, scene } = await getPipelineArtifacts(state, signature);
+      respondJson(res, { scene, raw: pipeline });
       return;
     }
     if (req.method === 'GET' && req.url === '/ai/llm-contract') {
@@ -75,92 +72,17 @@ export function buildServer() {
       const url = new URL(req.url, 'http://localhost');
       const viewerId = url.searchParams.get('viewerId');
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const scene = compileSceneGraph(result);
-      const directivesResult = planDirectives(state, result);
-      const narrative = compileNarrative(state, result);
-      const reasoning = buildReasoningStrip({
-        pipeline: result,
-        narrative,
-        directives: directivesResult,
-        scene,
-        state
-      });
-      const chain = buildReasoningChain({
-        reasoning,
-        pipeline: result,
-        directives: directivesResult
-      });
-      const multiGoal = evaluateMultiGoalPortfolio({
-        state,
-        analysis: { pipeline: result },
-        meta: { commands: commandsSpec }
-      });
-      const integrityDeviations = analyzeIntegrityDeviations(
-        result.history || [],
-        result.integrity || {},
-        result.analysis?.teamGovernance || null
-      );
-      const session = buildSessionSnapshot({
-        state,
-        pipelineOutput: result,
-        scene,
-        narrative,
-        directives: directivesResult,
-        commandSpec: commandsSpec,
-        reasoning,
-        chain,
-        multiGoal,
-        integrityDeviations
-      });
+      const signature = computeStateSignature(state);
+      const { session, pipeline, scene, directivesResult, narrative, reasoning, chain, multiGoal, integrityDeviations } =
+        await getSessionArtifacts(state, signature);
       const filtered = filterSessionForViewer(session, viewerId, session.teamRoles, 'team');
       respondJson(res, { ok: true, ...filtered });
       return;
     }
     if (req.method === 'GET' && req.url === '/ai/llm-suggestions') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const scene = compileSceneGraph(result);
-      const directivesResult = planDirectives(state, result);
-      const narrative = compileNarrative(state, result);
-      const reasoning = buildReasoningStrip({
-        pipeline: result,
-        narrative,
-        directives: directivesResult,
-        scene,
-        state
-      });
-      const chain = buildReasoningChain({
-        reasoning,
-        pipeline: result,
-        directives: directivesResult
-      });
-      const multiGoal = evaluateMultiGoalPortfolio({
-        state,
-        analysis: { pipeline: result },
-        meta: { commands: commandsSpec }
-      });
-      const integrityDeviations = analyzeIntegrityDeviations(
-        result.history || [],
-        result.integrity || {},
-        result.analysis?.teamGovernance || null
-      );
-      const session = buildSessionSnapshot({
-        state,
-        pipelineOutput: result,
-        scene,
-        narrative,
-        directives: directivesResult,
-        commandSpec: commandsSpec,
-        reasoning,
-        chain,
-        multiGoal,
-        integrityDeviations
-      });
+      const signature = computeStateSignature(state);
+      const { session } = await getSessionArtifacts(state, signature);
       const suggestions = await runSuggestions({ session });
       respondJson(res, { ok: true, ...suggestions });
       return;
@@ -172,12 +94,12 @@ export function buildServer() {
       try {
         const state = await readState();
         const { nextState, effects } = interpretCommand(command, commandsSpec, state);
-        await writeState(nextState);
-        const goalInput = nextState.goals?.length ? { goals: nextState.goals } : mockGoals;
-        const identity = Object.keys(nextState.identity || {}).length ? nextState.identity : mockIdentity;
-        const result = runPipeline(goalInput, identity, nextState.history || [], nextState.tasks || [], nextState.team);
-        const scene = compileSceneGraph(result);
-        respondJson(res, { ok: true, effects, scene, raw: result });
+        const persisted = await writeState(nextState);
+        const signature = computeStateSignature(persisted);
+        stateCache.invalidate();
+        warmAnalysis(persisted, signature);
+        const { pipeline, scene } = await getPipelineArtifacts(persisted, signature);
+        respondJson(res, { ok: true, effects, scene, raw: pipeline });
       } catch (err) {
         const status = err?.code === 'INVALID_COMMAND' ? 400 : 500;
         respondJson(res, { ok: false, error: err.message || 'Internal error' }, status);
@@ -187,123 +109,39 @@ export function buildServer() {
 
     if (req.method === 'GET' && req.url === '/ai/narrative') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const scene = compileSceneGraph(result);
-      const narrative = compileNarrative(state, result);
-      respondJson(res, { narrative, scene, state });
+      const signature = computeStateSignature(state);
+      const { pipeline, scene, narrative } = await getSessionArtifacts(state, signature);
+      respondJson(res, { narrative, scene, state, raw: pipeline });
       return;
     }
 
     if (req.method === 'GET' && req.url === '/ai/directives') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const directivesResult = planDirectives(state, result);
-      const scene = compileSceneGraph(result);
+      const signature = computeStateSignature(state);
+      const { pipeline, directivesResult, scene } = await getSessionArtifacts(state, signature);
       respondJson(res, {
         ok: true,
         directives: directivesResult.directives,
         summary: directivesResult.summary,
         scene,
-        raw: result
+        raw: pipeline
       });
       return;
     }
 
     if (req.method === 'GET' && req.url === '/ai/session') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const scene = compileSceneGraph(result);
-      const narrative = compileNarrative(state, result);
-      const directivesResult = planDirectives(state, result);
-      const reasoning = buildReasoningStrip({
-        pipeline: result,
-        narrative,
-        directives: directivesResult,
-        scene,
-        state
-      });
-      const chain = buildReasoningChain({
-        reasoning,
-        pipeline: result,
-        directives: directivesResult
-      });
-      const multiGoal = evaluateMultiGoalPortfolio({
-        state,
-        analysis: { pipeline: result },
-        meta: { commands: commandsSpec }
-      });
-      const integrityDeviations = analyzeIntegrityDeviations(
-        result.history || [],
-        result.integrity || {},
-        result.analysis?.teamGovernance || null
-      );
+      const signature = computeStateSignature(state);
+      const { session, teamHud } = await getSessionArtifacts(state, signature);
       const timestamp = new Date().toISOString();
-      const session = buildSessionSnapshot({
-        state,
-        pipelineOutput: result,
-        scene,
-        narrative,
-        directives: directivesResult,
-        commandSpec: commandsSpec,
-        reasoning,
-        chain,
-        multiGoal,
-        integrityDeviations
-      });
-      const teamHud = buildTeamHud(session);
       respondJson(res, { ok: true, timestamp, session, teamHud });
       return;
     }
 
     if (req.method === 'GET' && req.url === '/team/export') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const result = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
-      const scene = compileSceneGraph(result);
-      const directivesResult = planDirectives(state, result);
-      const narrative = compileNarrative(state, result);
-      const reasoning = buildReasoningStrip({
-        pipeline: result,
-        narrative,
-        directives: directivesResult,
-        scene,
-        state
-      });
-      const chain = buildReasoningChain({
-        reasoning,
-        pipeline: result,
-        directives: directivesResult
-      });
-      const multiGoal = evaluateMultiGoalPortfolio({
-        state,
-        analysis: { pipeline: result },
-        meta: { commands: commandsSpec }
-      });
-      const integrityDeviations = analyzeIntegrityDeviations(
-        result.history || [],
-        result.integrity || {},
-        result.analysis?.teamGovernance || null
-      );
-      const session = buildSessionSnapshot({
-        state,
-        pipelineOutput: result,
-        scene,
-        narrative,
-        directives: directivesResult,
-        commandSpec: commandsSpec,
-        reasoning,
-        chain,
-        multiGoal,
-        integrityDeviations
-      });
-      const exportPayload = buildTeamExport(session);
+      const signature = computeStateSignature(state);
+      const { exportPayload } = await getSessionArtifacts(state, signature);
       respondJson(res, { ok: true, export: exportPayload });
       return;
     }
@@ -322,12 +160,21 @@ export function buildServer() {
       console.log('Saving definite goal:', text);
 
       const updated = await appendGoal(text);
-
+      stateCache.invalidate();
+      warmAnalysis(updated, computeStateSignature(updated));
       respondJson(res, { ok: true, goals: updated.goals || [] }, 200);
       return;
     }
 
     if (req.method === 'POST' && req.url === '/identity') {
+      const payload = await readBody(req);
+      if (!payload?.domain || !payload?.capability || payload.level === undefined) {
+        respondJson(res, { error: 'domain, capability, and level required' }, 400);
+        return;
+      }
+      const next = await updateIdentity(payload.domain, payload.capability, Number(payload.level));
+      stateCache.invalidate();
+      warmAnalysis(next, computeStateSignature(next));
       const payload = await parseJsonRequest(req, res, identitySchema);
       if (!payload) return;
 
@@ -349,11 +196,21 @@ export function buildServer() {
         identity[domain][capability] = { level };
       });
       const nextState = await writeState({ ...current, identity });
+      stateCache.invalidate();
+      warmAnalysis(nextState, computeStateSignature(nextState));
       respondJson(res, { identity: nextState.identity || {} });
       return;
     }
 
     if (req.method === 'POST' && req.url === '/tasks') {
+      const payload = await readBody(req);
+      if (!payload?.id || !payload?.status) {
+        respondJson(res, { error: 'id and status required' }, 400);
+        return;
+      }
+      const next = await recordTaskStatus(payload.id, payload.status);
+      stateCache.invalidate();
+      warmAnalysis(next, computeStateSignature(next));
       const payload = await parseJsonRequest(req, res, taskRecordSchema);
       if (!payload) return;
       await recordTaskStatus(payload.id, payload.status);
@@ -362,6 +219,19 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/task-status') {
+      const payload = await readJsonBody(req);
+      const { taskId, status } = payload || {};
+      if (!taskId || typeof taskId !== 'string') {
+        respondJson(res, { error: 'taskId is required.' }, 400);
+        return;
+      }
+      if (!['completed', 'missed'].includes(status)) {
+        respondJson(res, { error: 'Invalid status.' }, 400);
+        return;
+      }
+      const updated = await recordTaskStatus(taskId, status);
+      stateCache.invalidate();
+      warmAnalysis(updated, computeStateSignature(updated));
       const payload = await parseJsonRequest(req, res, taskStatusSchema);
       if (!payload) return;
       const updated = await recordTaskStatus(payload.taskId, payload.status);
@@ -371,17 +241,16 @@ export function buildServer() {
 
     if (req.method === 'POST' && req.url === '/cycle/next') {
       const state = await readState();
-      const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
-      const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
-      const history = state.history || [];
-      const tasks = state.tasks || [];
-      const result = runPipeline(goalInput, identity, history, tasks, state?.team);
-      respondJson(res, { ...result, state });
+      const signature = computeStateSignature(state);
+      const { pipeline } = await getPipelineArtifacts(state, signature);
+      respondJson(res, { ...pipeline, state });
       return;
     }
 
     if (req.method === 'POST' && req.url === '/reset') {
-      await writeState({ goals: [], identity: {}, history: [] });
+      const resetState = await writeState({ goals: [], identity: {}, history: [] });
+      stateCache.invalidate();
+      warmAnalysis(resetState, computeStateSignature(resetState));
       respondJson(res, { status: 'reset' });
       return;
     }
@@ -412,6 +281,93 @@ function respondJson(res, body, status = 200) {
   res.end(JSON.stringify(body, null, 2));
 }
 
+async function getPipelineArtifacts(state, signature) {
+  return stateCache.get(
+    'pipeline',
+    signature,
+    () => buildPipelineArtifacts(state),
+    analysisQueue
+  );
+}
+
+async function getSessionArtifacts(state, signature) {
+  return stateCache.get(
+    'session',
+    signature,
+    () => buildSessionArtifacts(state, signature),
+    analysisQueue
+  );
+}
+
+function warmAnalysis(state, signature) {
+  stateCache.warm('pipeline', signature, () => buildPipelineArtifacts(state), analysisQueue);
+  stateCache.warm('session', signature, () => buildSessionArtifacts(state, signature), analysisQueue);
+}
+
+async function buildPipelineArtifacts(state) {
+  const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
+  const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
+  const pipeline = runPipeline(goalInput, identity, state.history || [], state.tasks || [], state.team);
+  const scene = compileSceneGraph(pipeline);
+  return { pipeline, scene, goalInput, identity };
+}
+
+async function buildSessionArtifacts(state, signature) {
+  const { pipeline, scene } = await getPipelineArtifacts(state, signature);
+  const directivesResult = planDirectives(state, pipeline);
+  const narrative = compileNarrative(state, pipeline);
+  const reasoning = buildReasoningStrip({
+    pipeline,
+    narrative,
+    directives: directivesResult,
+    scene,
+    state
+  });
+  const chain = buildReasoningChain({
+    reasoning,
+    pipeline,
+    directives: directivesResult
+  });
+  const multiGoal = evaluateMultiGoalPortfolio({
+    state,
+    analysis: { pipeline },
+    meta: { commands: commandsSpec }
+  });
+  const integrityDeviations = analyzeIntegrityDeviations(
+    pipeline.history || [],
+    pipeline.integrity || {},
+    pipeline.analysis?.teamGovernance || null
+  );
+  const session = buildSessionSnapshot({
+    state,
+    pipelineOutput: pipeline,
+    scene,
+    narrative,
+    directives: directivesResult,
+    commandSpec: commandsSpec,
+    reasoning,
+    chain,
+    multiGoal,
+    integrityDeviations
+  });
+  const teamHud = buildTeamHud(session);
+  const exportPayload = buildTeamExport(session);
+  return {
+    pipeline,
+    scene,
+    directivesResult,
+    narrative,
+    reasoning,
+    chain,
+    multiGoal,
+    integrityDeviations,
+    session,
+    teamHud,
+    exportPayload
+  };
+}
+
+async function readJsonBody(req) {
 async function parseJsonRequest(req, res, schema) {
   let payload;
   try {
