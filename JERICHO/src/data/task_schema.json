@@ -1,0 +1,14 @@
+{
+  "name": "task_schema",
+  "description": "Task artifact used by the closed-loop pipeline",
+  "fields": {
+    "id": "string",
+    "title": "string",
+    "description": "string",
+    "domain": "string",
+    "capability": "string",
+    "priority": "number",
+    "integrityScore": "number",
+    "status": "string"
+  }
+}

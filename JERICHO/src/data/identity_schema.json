@@ -1,0 +1,10 @@
+{
+  "name": "identity_schema",
+  "description": "Baseline identity representation for Jericho",
+  "fields": {
+    "domain": "string",
+    "capability": "string",
+    "level": "number",
+    "evidence": "string"
+  }
+}

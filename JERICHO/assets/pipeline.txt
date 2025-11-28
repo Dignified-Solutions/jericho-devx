@@ -1,0 +1,16 @@
+Goal Input
+  │
+  ▼
+Identity Requirements
+  │
+  ▼
+Gap Detection
+  │
+  ▼
+Task Generation
+  │
+  ▼
+Integrity Scoring
+  │
+  ▼
+Reinforcement + Sync
