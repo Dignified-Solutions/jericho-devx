@@ -1,4 +1,5 @@
 import http from 'http';
+import { createRequire } from 'module';
 import { runPipeline } from '../core/pipeline.js';
 import { mockGoals, mockIdentity } from '../data/mock-data.js';
 import { readState, appendGoal, updateIdentity, recordTaskStatus, writeState } from '../data/storage.js';
@@ -15,27 +16,38 @@ import { buildTeamHud, buildTeamExport } from '../core/team-hud.js';
 import { filterSessionForViewer } from '../core/team-roles.js';
 import { getLLMContract } from '../ai/llm-contract.js';
 import { runSuggestions } from '../llm/suggestion-runner.js';
-import commandsSpec from '../ai/commands-spec.json' assert { type: 'json' };
-import { computeStateSignature, createStateCache, JobQueue } from './state-cache.js';
+import { goalSchema, identityPatchSchema, identitySchema, taskRecordSchema, taskStatusSchema } from './validation.js';
 
 const port = 3000;
-const stateCache = createStateCache();
-const analysisQueue = new JobQueue();
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB limit
+const require = createRequire(import.meta.url);
+const commandsSpec = require('../ai/commands-spec.json');
 
-const server = http.createServer(async (req, res) => {
-  enableCors(res);
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  try {
-    if (req.method === 'GET' && req.url === '/health') {
-      respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
+export function buildServer() {
+  return http.createServer(async (req, res) => {
+    const corsResult = applyCors(req, res);
+    if (corsResult.blocked) {
+      respondJson(res, { error: corsResult.message }, 403);
       return;
     }
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const auth = authenticateRequest(req, mutationRoutes);
+    if (!auth.authorized) {
+      respondJson(res, { error: auth.message }, auth.status || 401);
+      return;
+    }
+
+    try {
+      if (req.method === 'GET' && req.url === '/health') {
+        respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
+        return;
+      }
 
     if (req.method === 'GET' && req.url === '/pipeline') {
       const state = await readState();
@@ -77,8 +89,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/ai/command') {
+      const command = await parseJsonRequest(req, res);
+      if (!command) return;
       try {
-        const command = await readJsonBody(req);
         const state = await readState();
         const { nextState, effects } = interpretCommand(command, commandsSpec, state);
         const persisted = await writeState(nextState);
@@ -140,20 +153,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/goals') {
-      const payload = await readJsonBody(req).catch(() => ({}));
+      const payload = await parseJsonRequest(req, res, goalSchema);
+      if (!payload) return;
 
-      let text =
-        (typeof payload.text === 'string' && payload.text) ||
-        (typeof payload.goal === 'string' && payload.goal) ||
-        (typeof payload.goalText === 'string' && payload.goalText) ||
-        Object.values(payload).find((v) => typeof v === 'string');
-
-      if (!text || !text.trim()) {
-        respondJson(res, { error: 'Goal text is required.' }, 400);
-        return;
-      }
-
-      text = text.trim();
+      const text = payload.text.trim();
       console.log('Saving definite goal:', text);
 
       const updated = await appendGoal(text);
@@ -172,27 +175,25 @@ const server = http.createServer(async (req, res) => {
       const next = await updateIdentity(payload.domain, payload.capability, Number(payload.level));
       stateCache.invalidate();
       warmAnalysis(next, computeStateSignature(next));
+      const payload = await parseJsonRequest(req, res, identitySchema);
+      if (!payload) return;
+
+      await updateIdentity(payload.domain, payload.capability, payload.level);
       respondJson(res, { status: 'ok' });
       return;
     }
 
     if (req.method === 'PATCH' && req.url === '/identity') {
-      const payload = await readJsonBody(req);
-      const updates = payload?.updates;
-      if (!updates || typeof updates !== 'object') {
-        respondJson(res, { error: 'Identity updates are required.' }, 400);
-        return;
-      }
+      const payload = await parseJsonRequest(req, res, identityPatchSchema);
+      if (!payload) return;
+
       const current = await readState();
       const identity = { ...(current.identity || {}) };
-      Object.entries(updates).forEach(([capId, value]) => {
-        const level = Number(value);
-        if (!Number.isFinite(level)) return;
-        if (capId.includes('.')) {
-          const [domain, capability] = capId.split('.');
-          identity[domain] = identity[domain] || {};
-          identity[domain][capability] = { level };
-        }
+      Object.entries(payload.updates).forEach(([capId, level]) => {
+        if (!capId.includes('.')) return;
+        const [domain, capability] = capId.split('.');
+        identity[domain] = identity[domain] || {};
+        identity[domain][capability] = { level };
       });
       const nextState = await writeState({ ...current, identity });
       stateCache.invalidate();
@@ -210,6 +211,9 @@ const server = http.createServer(async (req, res) => {
       const next = await recordTaskStatus(payload.id, payload.status);
       stateCache.invalidate();
       warmAnalysis(next, computeStateSignature(next));
+      const payload = await parseJsonRequest(req, res, taskRecordSchema);
+      if (!payload) return;
+      await recordTaskStatus(payload.id, payload.status);
       respondJson(res, { status: 'ok' });
       return;
     }
@@ -228,6 +232,9 @@ const server = http.createServer(async (req, res) => {
       const updated = await recordTaskStatus(taskId, status);
       stateCache.invalidate();
       warmAnalysis(updated, computeStateSignature(updated));
+      const payload = await parseJsonRequest(req, res, taskStatusSchema);
+      if (!payload) return;
+      const updated = await recordTaskStatus(payload.taskId, payload.status);
       respondJson(res, { ok: true, state: updated });
       return;
     }
@@ -250,17 +257,22 @@ const server = http.createServer(async (req, res) => {
 
     respondJson(res, { error: 'Not found' }, 404);
   } catch (err) {
-    respondJson(res, { error: err.message || 'server error' }, 500);
+    const status = err?.statusCode || 500;
+    const message = status === 500 ? 'server error' : err.message || 'Bad request';
+    respondJson(res, { error: message }, status);
   }
-});
 
-server.listen(port, () => {
-  process.stdout.write(`Jericho API listening on http://localhost:${port}\n`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  server.listen(port, () => {
+    process.stdout.write(`Jericho API listening on http://localhost:${port}\n`);
+  });
+}
+
+export { server };
 
 function enableCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -356,35 +368,84 @@ async function buildSessionArtifacts(state, signature) {
 }
 
 async function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk) => {
-      data += chunk;
-    });
-    req.on('end', () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on('error', reject);
-  });
+async function parseJsonRequest(req, res, schema) {
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (err) {
+    if (err?.status === 413) {
+      respondJson(res, { error: 'Payload too large.' }, 413);
+      return null;
+    }
+    respondJson(res, { error: 'Invalid JSON payload.' }, 400);
+    return null;
+  }
+
+  if (!schema) return payload || {};
+
+  const parsed = schema.safeParse(payload || {});
+  if (!parsed.success) {
+    respondJson(
+      res,
+      { error: 'Invalid request body.', details: formatValidationErrors(parsed.error.issues) },
+      400
+    );
+    return null;
+  }
+
+  return parsed.data;
 }
 
-async function readBody(req) {
+function formatValidationErrors(issues = []) {
+  return issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`);
+}
+
+async function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let size = 0;
+    let tooLarge = false;
+
     req.on('data', (chunk) => {
+      if (tooLarge) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        tooLarge = true;
+        const error = new Error('Request entity too large');
+        error.status = 413;
+        reject(error);
+        return;
+      }
       data += chunk;
-    });
-    req.on('end', () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (err) {
+      if (Buffer.byteLength(data) > MAX_BODY_BYTES) {
+        const err = new Error('Request body too large');
+        err.statusCode = 413;
+        req.destroy();
         reject(err);
       }
     });
+
+    req.on('end', () => {
+      if (tooLarge) return;
+      if (!data) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(data));
+      } catch (err) {
+        err.status = 400;
+        reject(err);
+      }
+    });
+
+    req.on('aborted', () => {
+      if (tooLarge) return;
+      const error = new Error('Request aborted');
+      error.status = 400;
+      reject(error);
+    });
+
     req.on('error', reject);
   });
 }
