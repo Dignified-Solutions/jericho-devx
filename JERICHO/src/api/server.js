@@ -15,24 +15,36 @@ import { buildTeamHud, buildTeamExport } from '../core/team-hud.js';
 import { filterSessionForViewer } from '../core/team-roles.js';
 import { getLLMContract } from '../ai/llm-contract.js';
 import { runSuggestions } from '../llm/suggestion-runner.js';
-import commandsSpec from '../ai/commands-spec.json' assert { type: 'json' };
+import commandsSpec from '../ai/commands-spec.json' with { type: 'json' };
 
 const port = 3000;
+const mutationRoutes = new Set(['/goals', '/identity', '/tasks', '/reset', '/cycle/next', '/task-status']);
 
-const server = http.createServer(async (req, res) => {
-  enableCors(res);
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  try {
-    if (req.method === 'GET' && req.url === '/health') {
-      respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
+export function buildServer() {
+  return http.createServer(async (req, res) => {
+    const corsResult = applyCors(req, res);
+    if (corsResult.blocked) {
+      respondJson(res, { error: corsResult.message }, 403);
       return;
     }
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const auth = authenticateRequest(req, mutationRoutes);
+    if (!auth.authorized) {
+      respondJson(res, { error: auth.message }, auth.status || 401);
+      return;
+    }
+
+    try {
+      if (req.method === 'GET' && req.url === '/health') {
+        respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
+        return;
+      }
 
     if (req.method === 'GET' && req.url === '/pipeline') {
       const state = await readState();
@@ -399,25 +411,150 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    respondJson(res, { error: 'Not found' }, 404);
-  } catch (err) {
-    respondJson(res, { error: err.message || 'server error' }, 500);
+      respondJson(res, { error: 'Not found' }, 404);
+    } catch (err) {
+      respondJson(res, { error: err.message || 'server error' }, 500);
+    }
+  });
+}
+
+export function startServer(listenPort = port) {
+  const server = buildServer();
+  server.listen(listenPort, () => {
+    process.stdout.write(`Jericho API listening on http://localhost:${listenPort}\n`);
+  });
+  return server;
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+function applyCors(req, res) {
+  const allowlist = getCorsAllowlist();
+  const origin = req.headers?.origin;
+  const host = req.headers?.host;
+  const allowedOrigin = selectAllowedOrigin(origin, host, allowlist);
+
+  if (origin && !allowedOrigin) {
+    return { blocked: true, message: 'Origin not allowed' };
   }
-});
 
-server.listen(port, () => {
-  process.stdout.write(`Jericho API listening on http://localhost:${port}\n`);
-});
+  if (!allowedOrigin) {
+    return { blocked: false, message: 'No matching origin' };
+  }
 
-function enableCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key');
+  return { blocked: false, message: 'ok', origin: allowedOrigin };
 }
 
 function respondJson(res, body, status = 200) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body, null, 2));
+}
+
+function authenticateRequest(req, mutationSet) {
+  const configuredTokens = getConfiguredTokens();
+  if (!configuredTokens.length) {
+    return { authorized: false, status: 401, message: 'API auth token not configured' };
+  }
+
+  const token = extractToken(req);
+  if (!token) {
+    return { authorized: false, status: 401, message: 'Missing API credentials' };
+  }
+
+  const match = configuredTokens.find((entry) => entry.token === token);
+  if (!match) {
+    return { authorized: false, status: 401, message: 'Unauthorized' };
+  }
+
+  const url = new URL(req.url, 'http://localhost');
+  const isMutation = mutationSet.has(url.pathname) && req.method !== 'GET';
+  const canMutate = ['admin', 'mutation', 'write'].includes(match.role);
+
+  if (isMutation && !canMutate) {
+    return { authorized: false, status: 403, message: 'Insufficient role for mutation route' };
+  }
+
+  return { authorized: true, role: match.role };
+}
+
+function extractToken(req) {
+  const authHeader = req.headers?.authorization;
+  const apiKeyHeader = req.headers?.['x-api-key'];
+
+  if (typeof apiKeyHeader === 'string' && apiKeyHeader.trim()) {
+    return apiKeyHeader.trim();
+  }
+
+  if (typeof authHeader === 'string') {
+    const normalized = authHeader.trim();
+    if (normalized.toLowerCase().startsWith('bearer ')) {
+      return normalized.slice(7).trim();
+    }
+    if (normalized.toLowerCase().startsWith('api-key ')) {
+      return normalized.slice(8).trim();
+    }
+    if (!normalized.includes(' ')) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function getConfiguredTokens() {
+  const entries = [
+    { token: process.env.API_TOKEN, role: 'admin' },
+    { token: process.env.API_KEY, role: 'admin' },
+    { token: process.env.API_MUTATION_TOKEN, role: 'mutation' },
+    { token: process.env.API_WRITE_TOKEN, role: 'mutation' },
+    { token: process.env.API_READ_TOKEN, role: 'read' }
+  ];
+
+  return entries
+    .filter((entry) => typeof entry.token === 'string' && entry.token.trim())
+    .map((entry) => ({ ...entry, token: entry.token.trim() }));
+}
+
+function getCorsAllowlist() {
+  const raw = process.env.CORS_ALLOWLIST || 'http://localhost:5173,http://127.0.0.1:5173';
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function selectAllowedOrigin(originHeader, hostHeader, allowlist) {
+  const normalizedAllowlist = allowlist
+    .map((entry) => {
+      try {
+        return new URL(entry).origin;
+      } catch (err) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  if (originHeader) {
+    return normalizedAllowlist.includes(originHeader) ? originHeader : null;
+  }
+
+  const hostName = (hostHeader || '').split(':')[0];
+  if (!hostName) return null;
+
+  const hostAllowedOrigin = normalizedAllowlist.find((entry) => {
+    try {
+      return new URL(entry).hostname === hostName;
+    } catch (err) {
+      return false;
+    }
+  });
+
+  return hostAllowedOrigin || null;
 }
 
 async function readJsonBody(req) {
