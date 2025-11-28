@@ -18,13 +18,33 @@ import { runSuggestions } from '../llm/suggestion-runner.js';
 import commandsSpec from '../ai/commands-spec.json' assert { type: 'json' };
 
 const port = 3000;
+const allowedOrigins = parseAllowList(process.env.ALLOWED_ORIGINS, [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+]);
+const readTokens = parseTokenList(
+  process.env.JERICHO_API_TOKENS ||
+    process.env.JERICHO_API_TOKEN ||
+    process.env.API_TOKENS ||
+    process.env.API_TOKEN
+);
+const mutationTokens = parseTokenList(
+  process.env.JERICHO_MUTATION_TOKENS || process.env.JERICHO_MUTATION_TOKEN || process.env.API_MUTATION_TOKEN
+);
 
 const server = http.createServer(async (req, res) => {
-  enableCors(res);
+  if (!applyCors(req, res, allowedOrigins)) {
+    return;
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
+    return;
+  }
+
+  const providedToken = extractAuthToken(req);
+  if (!authenticateRequest(res, providedToken, readTokens)) {
     return;
   }
 
@@ -299,6 +319,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/goals') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readJsonBody(req).catch(() => ({}));
 
       let text =
@@ -322,6 +345,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/identity') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readBody(req);
       if (!payload?.domain || !payload?.capability || payload.level === undefined) {
         respondJson(res, { error: 'domain, capability, and level required' }, 400);
@@ -333,6 +359,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'PATCH' && req.url === '/identity') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readJsonBody(req);
       const updates = payload?.updates;
       if (!updates || typeof updates !== 'object') {
@@ -356,6 +385,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/tasks') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readBody(req);
       if (!payload?.id || !payload?.status) {
         respondJson(res, { error: 'id and status required' }, 400);
@@ -367,6 +399,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/task-status') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readJsonBody(req);
       const { taskId, status } = payload || {};
       if (!taskId || typeof taskId !== 'string') {
@@ -383,6 +418,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/cycle/next') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const state = await readState();
       const goalInput = state.goals?.length ? { goals: state.goals } : mockGoals;
       const identity = Object.keys(state.identity || {}).length ? state.identity : mockIdentity;
@@ -394,6 +432,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/reset') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       await writeState({ goals: [], identity: {}, history: [] });
       respondJson(res, { status: 'reset' });
       return;
@@ -409,15 +450,92 @@ server.listen(port, () => {
   process.stdout.write(`Jericho API listening on http://localhost:${port}\n`);
 });
 
-function enableCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-}
-
 function respondJson(res, body, status = 200) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body, null, 2));
+}
+
+function applyCors(req, res, origins) {
+  const origin = req.headers.origin;
+  const allowedOrigins = Array.isArray(origins) ? origins.filter(Boolean) : [];
+
+  if (origin) {
+    if (!allowedOrigins.includes(origin)) {
+      respondJson(res, { error: 'Origin not allowed.' }, 403);
+      return false;
+    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+
+  return true;
+}
+
+function parseAllowList(rawOrigins, fallback = []) {
+  if (typeof rawOrigins !== 'string' || !rawOrigins.trim()) {
+    return [...fallback];
+  }
+  return rawOrigins
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function parseTokenList(rawTokens) {
+  if (typeof rawTokens !== 'string' || !rawTokens.trim()) {
+    return [];
+  }
+  return rawTokens
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function extractAuthToken(req) {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim();
+  }
+
+  const apiKeyHeader = req.headers['x-api-key'];
+  if (typeof apiKeyHeader === 'string') {
+    return apiKeyHeader.trim();
+  }
+
+  return '';
+}
+
+function authenticateRequest(res, providedToken, allowedTokens) {
+  if (!Array.isArray(allowedTokens) || allowedTokens.length === 0) {
+    respondJson(res, { error: 'Server authentication is not configured.' }, 500);
+    return false;
+  }
+
+  if (!providedToken || !allowedTokens.includes(providedToken)) {
+    respondJson(res, { error: 'Unauthorized.' }, 401);
+    return false;
+  }
+
+  return true;
+}
+
+function authorizeMutation(res, providedToken, allowedMutationTokens, allowedReadTokens) {
+  const expectedTokens = allowedMutationTokens?.length ? allowedMutationTokens : allowedReadTokens;
+
+  if (!expectedTokens || expectedTokens.length === 0) {
+    respondJson(res, { error: 'Server authorization is not configured.' }, 500);
+    return false;
+  }
+
+  if (!providedToken || !expectedTokens.includes(providedToken)) {
+    respondJson(res, { error: 'Forbidden.' }, 403);
+    return false;
+  }
+
+  return true;
 }
 
 async function readJsonBody(req) {
