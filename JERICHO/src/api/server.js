@@ -23,20 +23,31 @@ const MAX_BODY_BYTES = 1024 * 1024; // 1MB limit
 const require = createRequire(import.meta.url);
 const commandsSpec = require('../ai/commands-spec.json');
 
-const server = http.createServer(async (req, res) => {
-  enableCors(res);
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  try {
-    if (req.method === 'GET' && req.url === '/health') {
-      respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
+export function buildServer() {
+  return http.createServer(async (req, res) => {
+    const corsResult = applyCors(req, res);
+    if (corsResult.blocked) {
+      respondJson(res, { error: corsResult.message }, 403);
       return;
     }
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const auth = authenticateRequest(req, mutationRoutes);
+    if (!auth.authorized) {
+      respondJson(res, { error: auth.message }, auth.status || 401);
+      return;
+    }
+
+    try {
+      if (req.method === 'GET' && req.url === '/health') {
+        respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
+        return;
+      }
 
     if (req.method === 'GET' && req.url === '/pipeline') {
       const state = await readState();
@@ -377,9 +388,10 @@ const server = http.createServer(async (req, res) => {
 
     respondJson(res, { error: 'Not found' }, 404);
   } catch (err) {
-    respondJson(res, { error: err.message || 'server error' }, 500);
+    const status = err?.statusCode || 500;
+    const message = status === 500 ? 'server error' : err.message || 'Bad request';
+    respondJson(res, { error: message }, status);
   }
-});
 
 if (process.env.NODE_ENV !== 'test') {
   server.listen(port, () => {
@@ -449,6 +461,12 @@ async function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
         return;
       }
       data += chunk;
+      if (Buffer.byteLength(data) > MAX_BODY_BYTES) {
+        const err = new Error('Request body too large');
+        err.statusCode = 413;
+        req.destroy();
+        reject(err);
+      }
     });
 
     req.on('end', () => {
