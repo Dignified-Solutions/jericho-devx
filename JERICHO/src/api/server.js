@@ -19,6 +19,24 @@ import { runSuggestions } from '../llm/suggestion-runner.js';
 import { goalSchema, identityPatchSchema, identitySchema, taskRecordSchema, taskStatusSchema } from './validation.js';
 
 const port = 3000;
+const allowedOrigins = parseAllowList(process.env.ALLOWED_ORIGINS, [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+]);
+const readTokens = parseTokenList(
+  process.env.JERICHO_API_TOKENS ||
+    process.env.JERICHO_API_TOKEN ||
+    process.env.API_TOKENS ||
+    process.env.API_TOKEN
+);
+const mutationTokens = parseTokenList(
+  process.env.JERICHO_MUTATION_TOKENS || process.env.JERICHO_MUTATION_TOKEN || process.env.API_MUTATION_TOKEN
+);
+
+const server = http.createServer(async (req, res) => {
+  if (!applyCors(req, res, allowedOrigins)) {
+    return;
+  }
 const MAX_BODY_BYTES = 1024 * 1024; // 1MB limit
 const require = createRequire(import.meta.url);
 const commandsSpec = require('../ai/commands-spec.json');
@@ -37,6 +55,14 @@ export function buildServer() {
       return;
     }
 
+  const providedToken = extractAuthToken(req);
+  if (!authenticateRequest(res, providedToken, readTokens)) {
+    return;
+  }
+
+  try {
+    if (req.method === 'GET' && req.url === '/health') {
+      respondJson(res, { status: 'alive', routes: ['/pipeline', '/state', '/goals', '/identity', '/tasks'] });
     const auth = authenticateRequest(req, mutationRoutes);
     if (!auth.authorized) {
       respondJson(res, { error: auth.message }, auth.status || 401);
@@ -153,6 +179,16 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/goals') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
+      const payload = await readJsonBody(req).catch(() => ({}));
+
+      let text =
+        (typeof payload.text === 'string' && payload.text) ||
+        (typeof payload.goal === 'string' && payload.goal) ||
+        (typeof payload.goalText === 'string' && payload.goalText) ||
+        Object.values(payload).find((v) => typeof v === 'string');
       const payload = await parseJsonRequest(req, res, goalSchema);
       if (!payload) return;
 
@@ -167,6 +203,9 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/identity') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readBody(req);
       if (!payload?.domain || !payload?.capability || payload.level === undefined) {
         respondJson(res, { error: 'domain, capability, and level required' }, 400);
@@ -184,6 +223,15 @@ export function buildServer() {
     }
 
     if (req.method === 'PATCH' && req.url === '/identity') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
+      const payload = await readJsonBody(req);
+      const updates = payload?.updates;
+      if (!updates || typeof updates !== 'object') {
+        respondJson(res, { error: 'Identity updates are required.' }, 400);
+        return;
+      }
       const payload = await parseJsonRequest(req, res, identityPatchSchema);
       if (!payload) return;
 
@@ -203,6 +251,9 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/tasks') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readBody(req);
       if (!payload?.id || !payload?.status) {
         respondJson(res, { error: 'id and status required' }, 400);
@@ -219,6 +270,9 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/task-status') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const payload = await readJsonBody(req);
       const { taskId, status } = payload || {};
       if (!taskId || typeof taskId !== 'string') {
@@ -240,6 +294,9 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/cycle/next') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
       const state = await readState();
       const signature = computeStateSignature(state);
       const { pipeline } = await getPipelineArtifacts(state, signature);
@@ -248,6 +305,10 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/reset') {
+      if (!authorizeMutation(res, providedToken, mutationTokens, readTokens)) {
+        return;
+      }
+      await writeState({ goals: [], identity: {}, history: [] });
       const resetState = await writeState({ goals: [], identity: {}, history: [] });
       stateCache.invalidate();
       warmAnalysis(resetState, computeStateSignature(resetState));
@@ -281,6 +342,87 @@ function respondJson(res, body, status = 200) {
   res.end(JSON.stringify(body, null, 2));
 }
 
+function applyCors(req, res, origins) {
+  const origin = req.headers.origin;
+  const allowedOrigins = Array.isArray(origins) ? origins.filter(Boolean) : [];
+
+  if (origin) {
+    if (!allowedOrigins.includes(origin)) {
+      respondJson(res, { error: 'Origin not allowed.' }, 403);
+      return false;
+    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+
+  return true;
+}
+
+function parseAllowList(rawOrigins, fallback = []) {
+  if (typeof rawOrigins !== 'string' || !rawOrigins.trim()) {
+    return [...fallback];
+  }
+  return rawOrigins
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function parseTokenList(rawTokens) {
+  if (typeof rawTokens !== 'string' || !rawTokens.trim()) {
+    return [];
+  }
+  return rawTokens
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function extractAuthToken(req) {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim();
+  }
+
+  const apiKeyHeader = req.headers['x-api-key'];
+  if (typeof apiKeyHeader === 'string') {
+    return apiKeyHeader.trim();
+  }
+
+  return '';
+}
+
+function authenticateRequest(res, providedToken, allowedTokens) {
+  if (!Array.isArray(allowedTokens) || allowedTokens.length === 0) {
+    respondJson(res, { error: 'Server authentication is not configured.' }, 500);
+    return false;
+  }
+
+  if (!providedToken || !allowedTokens.includes(providedToken)) {
+    respondJson(res, { error: 'Unauthorized.' }, 401);
+    return false;
+  }
+
+  return true;
+}
+
+function authorizeMutation(res, providedToken, allowedMutationTokens, allowedReadTokens) {
+  const expectedTokens = allowedMutationTokens?.length ? allowedMutationTokens : allowedReadTokens;
+
+  if (!expectedTokens || expectedTokens.length === 0) {
+    respondJson(res, { error: 'Server authorization is not configured.' }, 500);
+    return false;
+  }
+
+  if (!providedToken || !expectedTokens.includes(providedToken)) {
+    respondJson(res, { error: 'Forbidden.' }, 403);
+    return false;
+  }
+
+  return true;
 async function getPipelineArtifacts(state, signature) {
   return stateCache.get(
     'pipeline',
