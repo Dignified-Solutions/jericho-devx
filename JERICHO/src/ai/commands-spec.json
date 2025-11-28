@@ -1,0 +1,17 @@
+{
+  "commandsVersion": 1,
+  "allowed": [
+    "create_goal",
+    "update_identity",
+    "complete_task",
+    "miss_task",
+    "advance_cycle"
+  ],
+  "schemas": {
+    "create_goal": { "text": "string" },
+    "update_identity": { "capabilityId": "string", "newLevel": "number" },
+    "complete_task": { "taskId": "string" },
+    "miss_task": { "taskId": "string" },
+    "advance_cycle": {}
+  }
+}

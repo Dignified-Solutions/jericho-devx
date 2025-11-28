@@ -5,7 +5,7 @@ import { scoreIntegrity } from '../core/scoring-engine.js';
  */
 export function applyReinforcement(taskBoard) {
   const history = taskBoard.history || [];
-  const integrityScore = scoreIntegrity(history);
+  const integrityScore = taskBoard.integrityScore ?? scoreIntegrity(history);
 
   const refreshedTasks = (taskBoard.tasks || []).map((task) => {
     if (task.status === 'done') return task;

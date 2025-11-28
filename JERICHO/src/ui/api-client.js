@@ -16,6 +16,10 @@ export function fetchPipeline() {
   return request('/pipeline');
 }
 
+export function fetchHealth() {
+  return request('/health');
+}
+
 export function postGoal(goal) {
   return request('/goals', { method: 'POST', body: JSON.stringify(goal) });
 }
@@ -26,4 +30,8 @@ export function postIdentity(payload) {
 
 export function postTaskStatus(payload) {
   return request('/tasks', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function resetState() {
+  return request('/reset', { method: 'POST' });
 }

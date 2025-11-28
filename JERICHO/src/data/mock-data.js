@@ -5,7 +5,7 @@ export const mockIdentity = {
 
 export const mockGoals = {
   goals: [
-    { domain: 'health', capability: 'sleep-hygiene', targetLevel: 4, rationale: 'Restore energy' },
-    { domain: 'focus', capability: 'deep-work', targetLevel: 5, rationale: 'Ship core milestone' }
+    'I will improve deep work capacity by 2026-03-01',
+    'I will increase daily movement by 2026-06-01'
   ]
 };

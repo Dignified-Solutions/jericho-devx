@@ -1,0 +1,12 @@
+{
+  "goals": [
+    {
+      "domain": "focus",
+      "capability": "health ",
+      "targetLevel": 3,
+      "rationale": "my life depends on it "
+    }
+  ],
+  "identity": {},
+  "history": []
+}

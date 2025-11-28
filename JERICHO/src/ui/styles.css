@@ -308,3 +308,397 @@ button {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+.analysis-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.analysis-card {
+  background: #0b1220;
+  border-radius: 12px;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.analysis-card .label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.analysis-card .value {
+  font-size: 18px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.analysis-card .meta {
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.analysis-card.health-green {
+  border-color: #16a34a;
+}
+
+.analysis-card.health-yellow {
+  border-color: #facc15;
+}
+
+.analysis-card.health-red {
+  border-color: #dc2626;
+}
+
+.analysis-card .meta.warning {
+  color: #f97316;
+}
+
+.analysis-strip.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 8px;
+}
+
+.analysis-pill {
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.analysis-pill.health-green {
+  border-color: rgba(46, 204, 113, 0.8);
+}
+
+.analysis-pill.health-yellow {
+  border-color: rgba(241, 196, 15, 0.9);
+}
+
+.analysis-pill.health-red {
+  border-color: rgba(231, 76, 60, 0.9);
+}
+
+.analysis-pill.mode-halt,
+.analysis-pill.mode-reset_identity,
+.analysis-pill.mode-review_goal {
+  border-color: rgba(231, 76, 60, 0.9);
+}
+
+.analysis-advisories {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.analysis-advisories .advisories-title {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+
+.analysis-advisories ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.analysis-advisories li {
+  margin: 2px 0;
+  color: var(--text);
+  opacity: 0.9;
+}
+
+.governance-board {
+  margin-top: 12px;
+  margin-bottom: 18px;
+}
+
+.governance-board-header {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.governance-metric {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+}
+
+.governance-metric .label {
+  opacity: 0.75;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.governance-metric .value {
+  font-weight: 600;
+}
+
+.governance-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.gov-column {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 12px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.gov-column-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.gov-column-title {
+  font-weight: 600;
+}
+
+.gov-column-count {
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+.gov-column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gov-task-card {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 13px;
+}
+
+.gov-task-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gov-task-title {
+  font-weight: 500;
+}
+
+.gov-task-meta {
+  display: flex;
+  align-items: center;
+}
+
+.domain-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.domain-under {
+  border-color: rgba(52, 152, 219, 0.9);
+}
+
+.domain-over {
+  border-color: rgba(231, 76, 60, 0.9);
+}
+
+.gov-task-reasons {
+  margin-top: 4px;
+  opacity: 0.75;
+  font-size: 11px;
+}
+
+.gov-task-explain {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.gov-task-headline {
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.gov-task-details {
+  margin: 4px 0 0;
+  padding-left: 14px;
+}
+
+.gov-task-details li {
+  opacity: 0.8;
+}
+
+.goal-input {
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+}
+
+.goal-save-button {
+  margin-top: 0.4rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 0.3rem;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.goal-error {
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  color: #f88;
+}
+
+.identity-list {
+  display: grid;
+  gap: 6px;
+}
+
+.identity-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.3rem;
+}
+
+.identity-label {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.identity-input {
+  width: 3rem;
+  padding: 0.2rem;
+  font-size: 0.75rem;
+}
+
+.identity-save-button {
+  margin-top: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.75rem;
+}
+
+.identity-error {
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  color: #f88;
+}
+
+.task-actions {
+  margin-top: 0.3rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.task-btn-complete,
+.task-btn-miss {
+  border: none;
+  border-radius: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.task-btn-complete {
+  background: rgba(80, 200, 120, 0.2);
+}
+
+.task-btn-miss {
+  background: rgba(240, 120, 80, 0.2);
+}
+
+.today-panel {
+  margin-bottom: 0.8rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.4rem;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.today-heading {
+  font-size: 0.85rem;
+  margin-bottom: 0.3rem;
+}
+
+.today-main-task {
+  display: flex;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.today-label {
+  opacity: 0.8;
+}
+
+.today-title {
+  font-weight: 500;
+}
+
+.today-meta {
+  margin-top: 0.3rem;
+  display: flex;
+  gap: 1rem;
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.today-empty {
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+
+.cycle-controls {
+  margin: 0.5rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cycle-next-button {
+  padding: 0.3rem 0.8rem;
+  border-radius: 0.3rem;
+  border: none;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.cycle-error {
+  font-size: 0.7rem;
+  color: #f88;
+}
+
+.gov-task-explain {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.gov-task-headline {
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.gov-task-details {
+  margin: 4px 0 0;
+  padding-left: 14px;
+}
+
+.gov-task-details li {
+  opacity: 0.8;
+}

@@ -1,11 +1,26 @@
-import { scoreIntegrity } from '../core/scoring-engine.js';
+import { computeIntegrityScore } from '../core/scoring-engine.js';
+import { TASK_STATUS } from '../core/task-status.js';
 
 export function evaluateIntegrity(taskBoard) {
-  const integrityScore = scoreIntegrity(taskBoard?.history || []);
-  const risk = integrityScore < 40 ? 'critical' : integrityScore < 70 ? 'warning' : 'stable';
+  const tasks = Array.isArray(taskBoard?.history)
+    ? taskBoard.history.map((item) => ({
+        status:
+          item.status === 'done'
+            ? TASK_STATUS.COMPLETED
+            : item.status === 'missed'
+            ? TASK_STATUS.MISSED
+            : TASK_STATUS.PENDING,
+        estimatedImpact: item.estimatedImpact || 0.5,
+        difficulty: item.difficulty || 2,
+        onTime: item.onTime ?? true
+      }))
+    : [];
+
+  const integrity = computeIntegrityScore(tasks);
+  const risk = integrity.score < 40 ? 'critical' : integrity.score < 70 ? 'warning' : 'stable';
 
   return {
-    integrityScore,
+    integrityScore: integrity.score,
     risk,
     recommendation: recommendationForRisk(risk)
   };
