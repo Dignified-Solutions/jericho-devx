@@ -11,6 +11,7 @@ let recordTaskStatus;
 let writeState;
 let mockGoals;
 let mockIdentity;
+let closeDatabase;
 
 beforeAll(async () => {
   const storageModule = await import('../../src/data/storage.js');
@@ -19,6 +20,7 @@ beforeAll(async () => {
   updateIdentity = storageModule.updateIdentity;
   recordTaskStatus = storageModule.recordTaskStatus;
   writeState = storageModule.writeState;
+  closeDatabase = storageModule.closeDatabase;
   const mockData = await import('../../src/data/mock-data.js');
   mockGoals = mockData.mockGoals;
   mockIdentity = mockData.mockIdentity;
@@ -26,8 +28,11 @@ beforeAll(async () => {
 
 describe('storage persistence', () => {
   afterEach(async () => {
+    await closeDatabase();
     try {
       await rm(tempStore);
+      await rm(`${tempStore}-wal`);
+      await rm(`${tempStore}-shm`);
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;
     }
