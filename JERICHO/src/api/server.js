@@ -18,6 +18,7 @@ import { runSuggestions } from '../llm/suggestion-runner.js';
 import commandsSpec from '../ai/commands-spec.json' assert { type: 'json' };
 
 const port = 3000;
+const MAX_BODY_BYTES = 1_000_000; // ~1MB guardrail to avoid unbounded buffering
 
 const server = http.createServer(async (req, res) => {
   enableCors(res);
@@ -299,7 +300,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/goals') {
-      const payload = await readJsonBody(req).catch(() => ({}));
+      const payload = await readJsonBody(req);
 
       let text =
         (typeof payload.text === 'string' && payload.text) ||
@@ -322,7 +323,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/identity') {
-      const payload = await readBody(req);
+      const payload = await readJsonBody(req);
       if (!payload?.domain || !payload?.capability || payload.level === undefined) {
         respondJson(res, { error: 'domain, capability, and level required' }, 400);
         return;
@@ -356,7 +357,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/tasks') {
-      const payload = await readBody(req);
+      const payload = await readJsonBody(req);
       if (!payload?.id || !payload?.status) {
         respondJson(res, { error: 'id and status required' }, 400);
         return;
@@ -401,7 +402,9 @@ const server = http.createServer(async (req, res) => {
 
     respondJson(res, { error: 'Not found' }, 404);
   } catch (err) {
-    respondJson(res, { error: err.message || 'server error' }, 500);
+    const status = err?.statusCode || 500;
+    const message = status === 500 ? 'server error' : err.message || 'Bad request';
+    respondJson(res, { error: message }, status);
   }
 });
 
@@ -425,28 +428,18 @@ async function readJsonBody(req) {
     let data = '';
     req.on('data', (chunk) => {
       data += chunk;
-    });
-    req.on('end', () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (err) {
+      if (Buffer.byteLength(data) > MAX_BODY_BYTES) {
+        const err = new Error('Request body too large');
+        err.statusCode = 413;
+        req.destroy();
         reject(err);
       }
     });
-    req.on('error', reject);
-  });
-}
-
-async function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk) => {
-      data += chunk;
-    });
     req.on('end', () => {
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch (err) {
+        err.statusCode = 400;
         reject(err);
       }
     });
