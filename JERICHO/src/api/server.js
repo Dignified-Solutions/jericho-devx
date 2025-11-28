@@ -1,4 +1,5 @@
 import http from 'http';
+import { createRequire } from 'module';
 import { runPipeline } from '../core/pipeline.js';
 import { mockGoals, mockIdentity } from '../data/mock-data.js';
 import { readState, appendGoal, updateIdentity, recordTaskStatus, writeState } from '../data/storage.js';
@@ -15,10 +16,12 @@ import { buildTeamHud, buildTeamExport } from '../core/team-hud.js';
 import { filterSessionForViewer } from '../core/team-roles.js';
 import { getLLMContract } from '../ai/llm-contract.js';
 import { runSuggestions } from '../llm/suggestion-runner.js';
-import commandsSpec from '../ai/commands-spec.json' with { type: 'json' };
+import { goalSchema, identityPatchSchema, identitySchema, taskRecordSchema, taskStatusSchema } from './validation.js';
 
 const port = 3000;
-const MAX_BODY_BYTES = 1_000_000; // ~1MB guardrail to avoid unbounded buffering
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB limit
+const require = createRequire(import.meta.url);
+const commandsSpec = require('../ai/commands-spec.json');
 
 export function buildServer() {
   return http.createServer(async (req, res) => {
@@ -164,8 +167,9 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/ai/command') {
+      const command = await parseJsonRequest(req, res);
+      if (!command) return;
       try {
-        const command = await readJsonBody(req);
         const state = await readState();
         const { nextState, effects } = interpretCommand(command, commandsSpec, state);
         await writeState(nextState);
@@ -311,20 +315,10 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/goals') {
-      const payload = await readJsonBody(req);
+      const payload = await parseJsonRequest(req, res, goalSchema);
+      if (!payload) return;
 
-      let text =
-        (typeof payload.text === 'string' && payload.text) ||
-        (typeof payload.goal === 'string' && payload.goal) ||
-        (typeof payload.goalText === 'string' && payload.goalText) ||
-        Object.values(payload).find((v) => typeof v === 'string');
-
-      if (!text || !text.trim()) {
-        respondJson(res, { error: 'Goal text is required.' }, 400);
-        return;
-      }
-
-      text = text.trim();
+      const text = payload.text.trim();
       console.log('Saving definite goal:', text);
 
       const updated = await appendGoal(text);
@@ -334,33 +328,25 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/identity') {
-      const payload = await readJsonBody(req);
-      if (!payload?.domain || !payload?.capability || payload.level === undefined) {
-        respondJson(res, { error: 'domain, capability, and level required' }, 400);
-        return;
-      }
-      await updateIdentity(payload.domain, payload.capability, Number(payload.level));
+      const payload = await parseJsonRequest(req, res, identitySchema);
+      if (!payload) return;
+
+      await updateIdentity(payload.domain, payload.capability, payload.level);
       respondJson(res, { status: 'ok' });
       return;
     }
 
     if (req.method === 'PATCH' && req.url === '/identity') {
-      const payload = await readJsonBody(req);
-      const updates = payload?.updates;
-      if (!updates || typeof updates !== 'object') {
-        respondJson(res, { error: 'Identity updates are required.' }, 400);
-        return;
-      }
+      const payload = await parseJsonRequest(req, res, identityPatchSchema);
+      if (!payload) return;
+
       const current = await readState();
       const identity = { ...(current.identity || {}) };
-      Object.entries(updates).forEach(([capId, value]) => {
-        const level = Number(value);
-        if (!Number.isFinite(level)) return;
-        if (capId.includes('.')) {
-          const [domain, capability] = capId.split('.');
-          identity[domain] = identity[domain] || {};
-          identity[domain][capability] = { level };
-        }
+      Object.entries(payload.updates).forEach(([capId, level]) => {
+        if (!capId.includes('.')) return;
+        const [domain, capability] = capId.split('.');
+        identity[domain] = identity[domain] || {};
+        identity[domain][capability] = { level };
       });
       const nextState = await writeState({ ...current, identity });
       respondJson(res, { identity: nextState.identity || {} });
@@ -368,28 +354,17 @@ export function buildServer() {
     }
 
     if (req.method === 'POST' && req.url === '/tasks') {
-      const payload = await readJsonBody(req);
-      if (!payload?.id || !payload?.status) {
-        respondJson(res, { error: 'id and status required' }, 400);
-        return;
-      }
+      const payload = await parseJsonRequest(req, res, taskRecordSchema);
+      if (!payload) return;
       await recordTaskStatus(payload.id, payload.status);
       respondJson(res, { status: 'ok' });
       return;
     }
 
     if (req.method === 'POST' && req.url === '/task-status') {
-      const payload = await readJsonBody(req);
-      const { taskId, status } = payload || {};
-      if (!taskId || typeof taskId !== 'string') {
-        respondJson(res, { error: 'taskId is required.' }, 400);
-        return;
-      }
-      if (!['completed', 'missed'].includes(status)) {
-        respondJson(res, { error: 'Invalid status.' }, 400);
-        return;
-      }
-      const updated = await recordTaskStatus(taskId, status);
+      const payload = await parseJsonRequest(req, res, taskStatusSchema);
+      if (!payload) return;
+      const updated = await recordTaskStatus(payload.taskId, payload.status);
       respondJson(res, { ok: true, state: updated });
       return;
     }
@@ -418,14 +393,18 @@ export function buildServer() {
     respondJson(res, { error: message }, status);
   }
 
-  if (!allowedOrigin) {
-    return { blocked: false, message: 'No matching origin' };
-  }
+if (process.env.NODE_ENV !== 'test') {
+  server.listen(port, () => {
+    process.stdout.write(`Jericho API listening on http://localhost:${port}\n`);
+  });
+}
 
-  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key');
-  return { blocked: false, message: 'ok', origin: allowedOrigin };
+export { server };
+
+function enableCors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
 function respondJson(res, body, status = 200) {
@@ -433,112 +412,54 @@ function respondJson(res, body, status = 200) {
   res.end(JSON.stringify(body, null, 2));
 }
 
-function authenticateRequest(req, mutationSet) {
-  const configuredTokens = getConfiguredTokens();
-  if (!configuredTokens.length) {
-    return { authorized: false, status: 401, message: 'API auth token not configured' };
-  }
-
-  const token = extractToken(req);
-  if (!token) {
-    return { authorized: false, status: 401, message: 'Missing API credentials' };
-  }
-
-  const match = configuredTokens.find((entry) => entry.token === token);
-  if (!match) {
-    return { authorized: false, status: 401, message: 'Unauthorized' };
-  }
-
-  const url = new URL(req.url, 'http://localhost');
-  const isMutation = mutationSet.has(url.pathname) && req.method !== 'GET';
-  const canMutate = ['admin', 'mutation', 'write'].includes(match.role);
-
-  if (isMutation && !canMutate) {
-    return { authorized: false, status: 403, message: 'Insufficient role for mutation route' };
-  }
-
-  return { authorized: true, role: match.role };
-}
-
-function extractToken(req) {
-  const authHeader = req.headers?.authorization;
-  const apiKeyHeader = req.headers?.['x-api-key'];
-
-  if (typeof apiKeyHeader === 'string' && apiKeyHeader.trim()) {
-    return apiKeyHeader.trim();
-  }
-
-  if (typeof authHeader === 'string') {
-    const normalized = authHeader.trim();
-    if (normalized.toLowerCase().startsWith('bearer ')) {
-      return normalized.slice(7).trim();
+async function parseJsonRequest(req, res, schema) {
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (err) {
+    if (err?.status === 413) {
+      respondJson(res, { error: 'Payload too large.' }, 413);
+      return null;
     }
-    if (normalized.toLowerCase().startsWith('api-key ')) {
-      return normalized.slice(8).trim();
-    }
-    if (!normalized.includes(' ')) {
-      return normalized;
-    }
+    respondJson(res, { error: 'Invalid JSON payload.' }, 400);
+    return null;
   }
 
-  return null;
-}
+  if (!schema) return payload || {};
 
-function getConfiguredTokens() {
-  const entries = [
-    { token: process.env.API_TOKEN, role: 'admin' },
-    { token: process.env.API_KEY, role: 'admin' },
-    { token: process.env.API_MUTATION_TOKEN, role: 'mutation' },
-    { token: process.env.API_WRITE_TOKEN, role: 'mutation' },
-    { token: process.env.API_READ_TOKEN, role: 'read' }
-  ];
-
-  return entries
-    .filter((entry) => typeof entry.token === 'string' && entry.token.trim())
-    .map((entry) => ({ ...entry, token: entry.token.trim() }));
-}
-
-function getCorsAllowlist() {
-  const raw = process.env.CORS_ALLOWLIST || 'http://localhost:5173,http://127.0.0.1:5173';
-  return raw
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function selectAllowedOrigin(originHeader, hostHeader, allowlist) {
-  const normalizedAllowlist = allowlist
-    .map((entry) => {
-      try {
-        return new URL(entry).origin;
-      } catch (err) {
-        return null;
-      }
-    })
-    .filter(Boolean);
-
-  if (originHeader) {
-    return normalizedAllowlist.includes(originHeader) ? originHeader : null;
+  const parsed = schema.safeParse(payload || {});
+  if (!parsed.success) {
+    respondJson(
+      res,
+      { error: 'Invalid request body.', details: formatValidationErrors(parsed.error.issues) },
+      400
+    );
+    return null;
   }
 
-  const hostName = (hostHeader || '').split(':')[0];
-  if (!hostName) return null;
-
-  const hostAllowedOrigin = normalizedAllowlist.find((entry) => {
-    try {
-      return new URL(entry).hostname === hostName;
-    } catch (err) {
-      return false;
-    }
-  });
-
-  return hostAllowedOrigin || null;
+  return parsed.data;
 }
 
-async function readJsonBody(req) {
+function formatValidationErrors(issues = []) {
+  return issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`);
+}
+
+async function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let size = 0;
+    let tooLarge = false;
+
     req.on('data', (chunk) => {
+      if (tooLarge) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        tooLarge = true;
+        const error = new Error('Request entity too large');
+        error.status = 413;
+        reject(error);
+        return;
+      }
       data += chunk;
       if (Buffer.byteLength(data) > MAX_BODY_BYTES) {
         const err = new Error('Request body too large');
@@ -547,14 +468,28 @@ async function readJsonBody(req) {
         reject(err);
       }
     });
+
     req.on('end', () => {
+      if (tooLarge) return;
+      if (!data) {
+        resolve({});
+        return;
+      }
       try {
-        resolve(data ? JSON.parse(data) : {});
+        resolve(JSON.parse(data));
       } catch (err) {
-        err.statusCode = 400;
+        err.status = 400;
         reject(err);
       }
     });
+
+    req.on('aborted', () => {
+      if (tooLarge) return;
+      const error = new Error('Request aborted');
+      error.status = 400;
+      reject(error);
+    });
+
     req.on('error', reject);
   });
 }
