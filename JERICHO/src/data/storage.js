@@ -1,10 +1,12 @@
 import { promises as fs } from 'fs';
+import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 import { mockGoals, mockIdentity } from './mock-data.js';
 import { EMPTY_TEAM_STATE, normalizeTeam } from '../core/team-model.js';
 
-const STORE_PATH =
-  process.env.STATE_PATH || path.join(process.cwd(), 'src', 'data', 'state.json');
+const DATA_DIR = process.env.JERICHO_DATA_DIR || path.join(os.homedir(), '.jericho');
+const STORE_PATH = process.env.STATE_PATH || path.join(DATA_DIR, 'state.db');
 
 const defaultState = buildState({
   goals: mockGoals.goals || [],
@@ -20,48 +22,91 @@ const defaultState = buildState({
   team: EMPTY_TEAM_STATE
 });
 
-export async function readState() {
-  try {
-    const raw = await fs.readFile(STORE_PATH, 'utf-8');
-    return buildState(JSON.parse(raw));
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      await writeState(defaultState);
-      return defaultState;
+let dbInstance = null;
+let dbReady = null;
+
+async function getDatabase() {
+  if (dbReady) return dbReady;
+
+  dbReady = (async () => {
+    await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
+    const db = new Database(STORE_PATH);
+    db.pragma('journal_mode = WAL');
+    db.exec('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)');
+
+    const existing = db.prepare('SELECT data FROM state WHERE id = 1').get();
+    if (!existing) {
+      db.prepare('INSERT INTO state (id, data) VALUES (1, ?)').run(JSON.stringify(defaultState));
     }
-    throw err;
+
+    dbInstance = db;
+    return db;
+  })();
+
+  return dbReady;
+}
+
+export async function readState() {
+  const db = await getDatabase();
+  const row = db.prepare('SELECT data FROM state WHERE id = 1').get();
+  if (!row) {
+    await writeState(defaultState);
+    return defaultState;
   }
+  return buildState(JSON.parse(row.data));
 }
 
 export async function writeState(state) {
-  const next = buildState(state);
-  await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
-  await fs.writeFile(STORE_PATH, JSON.stringify(next, null, 2));
-  return next;
+  return updateState(() => state);
 }
 
 export async function appendGoal(goal) {
-  const current = await readState();
-  const goals = [...(current.goals || []), goal];
-  return writeState({ ...current, goals });
+  return updateState((current) => {
+    const goals = [...(current.goals || []), goal];
+    return { ...current, goals };
+  });
 }
 
 export async function updateIdentity(domain, capability, level) {
-  const current = await readState();
-  const identity = {
-    ...(current.identity || {}),
-    [domain]: { ...(current.identity?.[domain] || {}), [capability]: { level } }
-  };
-  return writeState({ ...current, identity });
+  return updateState((current) => {
+    const identity = {
+      ...(current.identity || {}),
+      [domain]: { ...(current.identity?.[domain] || {}), [capability]: { level } }
+    };
+    return { ...current, identity };
+  });
 }
 
 export async function recordTaskStatus(taskId, status) {
-  const current = await readState();
-  const history = [...(current.history || []), { id: taskId, status, at: new Date().toISOString() }];
-  const tasks = (current.tasks || []).map((task) =>
-    task.id === taskId ? { ...task, status } : task
-  );
-  return writeState({ ...current, history, tasks });
+  return updateState((current) => {
+    const history = [...(current.history || []), { id: taskId, status, at: new Date().toISOString() }];
+    const tasks = (current.tasks || []).map((task) =>
+      task.id === taskId ? { ...task, status } : task
+    );
+    return { ...current, history, tasks };
+  });
+}
+
+export async function closeDatabase() {
+  if (dbInstance) {
+    dbInstance.close();
+  }
+  dbInstance = null;
+  dbReady = null;
+}
+
+async function updateState(mutator) {
+  const db = await getDatabase();
+  const tx = db.transaction((nextStateBuilder) => {
+    const row = db.prepare('SELECT data FROM state WHERE id = 1').get();
+    const current = row ? buildState(JSON.parse(row.data)) : defaultState;
+    const next = buildState(nextStateBuilder(current));
+    db.prepare(
+      'INSERT INTO state (id, data) VALUES (1, @data) ON CONFLICT(id) DO UPDATE SET data = excluded.data'
+    ).run({ data: JSON.stringify(next) });
+    return next;
+  });
+  return tx(mutator);
 }
 
 function buildState(raw) {
